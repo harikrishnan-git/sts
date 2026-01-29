@@ -1,3 +1,13 @@
+#custom
+episodic_cv/
+data/Soft-tissue-Sarcoma/
+data/metadata.csv
+data/study_list.csv
+doiJNLP-zgVcrK7I (2).tcia
+INFOclinical_STS (1).xlsx
+Untitled.ipynb
+vit.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
