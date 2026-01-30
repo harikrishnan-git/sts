@@ -1,7 +1,7 @@
 from train_one_fold import train_one_fold
 import os
 
-CV_DIR = "cv"
+CV_DIR = "episodic_cv"
 EPISODES = 5
 FOLDS = 5
 

@@ -1,8 +1,34 @@
 import os
 import pandas as pd
 
-ROOT = r"/mnt/c/Users/harib/OneDrive/Desktop/Projects/Main project/manifest-MjbMt99Q1553106146386120388/Soft-tissue-Sarcoma"
+# ------------------ PATHS ------------------
+ROOT = r"/content/drive/MyDrive/Main project/data/Soft-tissue-Sarcoma"
+STUDY_LIST_CSV = r"/content/drive/MyDrive/Main project/data/study_list.csv"   # <-- update path if needed
+OUTPUT_CSV = "/content/drive/MyDrive/Main project/data/sts_index_all_sequences.csv"
 
+# ------------------ LOAD STUDY LIST ------------------
+study_df = pd.read_csv(STUDY_LIST_CSV)
+
+PATIENT_COL = "Patient ID"
+LABEL_COL = "Histological type"
+
+# sanity check
+if PATIENT_COL not in study_df.columns or LABEL_COL not in study_df.columns:
+    raise ValueError(
+        f"study_list.csv must contain columns "
+        f"'{PATIENT_COL}' and '{LABEL_COL}'. "
+        f"Found: {list(study_df.columns)}"
+    )
+
+# create patient → histopathology map (unique per patient)
+patient_to_label = (
+    study_df[[PATIENT_COL, LABEL_COL]]
+    .drop_duplicates(subset=PATIENT_COL)
+    .set_index(PATIENT_COL)[LABEL_COL]
+    .to_dict()
+)
+
+# ------------------ BUILD INDEX ------------------
 rows = []
 
 for patient_id in os.listdir(ROOT):
@@ -10,12 +36,15 @@ for patient_id in os.listdir(ROOT):
     if not os.path.isdir(patient_path):
         continue
 
+    # get histopathology label (or UNKNOWN)
+    histo_type = patient_to_label.get(patient_id, "UNKNOWN")
+
     for study in os.listdir(patient_path):
         study_path = os.path.join(patient_path, study)
         if not os.path.isdir(study_path):
             continue
 
-        # Extract body part safely
+        # -------- BODY PART EXTRACTION --------
         parts = study.split("-")
         body_part = "UNKNOWN"
         for p in parts:
@@ -28,7 +57,7 @@ for patient_id in os.listdir(ROOT):
             if not os.path.isdir(seq_path):
                 continue
 
-            # ---- MRI SEQUENCE HANDLING ----
+            # -------- MRI SEQUENCE HANDLING --------
             seq_name = seq_folder.lower()
 
             if "t1" in seq_name:
@@ -56,15 +85,21 @@ for patient_id in os.listdir(ROOT):
 
             rows.append({
                 "patient_id": patient_id,
+                "histological_type": histo_type,   # ✅ from study_list.csv
                 "study_folder": study,
                 "body_part": body_part,
-                "sequence_folder": seq_folder,   # exact name (IMPORTANT)
-                "sequence_type": sequence_type, # normalized label
+                "sequence_folder": seq_folder,
+                "sequence_type": sequence_type,
                 "dicom_dir": seq_path
             })
 
+# ------------------ SAVE ------------------
 df = pd.DataFrame(rows)
-df.to_csv("sts_index_all_sequences.csv", index=False)
+df.to_csv(OUTPUT_CSV, index=False)
 
-print("Index created successfully")
+print("✅ Index created successfully")
+print("\nSequence distribution:")
 print(df["sequence_type"].value_counts())
+
+print("\nHistopathology distribution:")
+print(df["histological_type"].value_counts())
