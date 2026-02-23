@@ -23,7 +23,7 @@ This project is designed to run easily by simply preparing `data/index.csv` and 
 
 ```bash
 git clone https://github.com/harikrishnan-git/sts.git
-cd few-shot-project
+cd sts
 ```
 
 ---
