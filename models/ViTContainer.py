@@ -2,7 +2,7 @@ import torch.nn as nn
 from models.vit_encoder import ViTEncoder
 
 
-class SiameseViT(nn.Module):
+class ViTContainer(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.encoder = ViTEncoder(embed_dim)

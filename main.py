@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 from dataset.mri_dataset import MRIDataset
 from dataset.episodic_dataset import EpisodicDataset
-from models.siamese import SiameseViT
+from models.ViTContainer import ViTContainer
 from train.train_fewshot import train_fewshot
 import config
 
@@ -24,7 +24,7 @@ def main():
     loader = DataLoader(episodic_ds, batch_size=1, shuffle=True)
     print("Data loading complete!!!")
 
-    model = SiameseViT(config.EMBED_DIM)
+    model = ViTContainer(config.EMBED_DIM)
     print("Model set up!!!")
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.LR)
     print("Optimizer functional!!")
