@@ -7,3 +7,8 @@ pydicom
 scikit-image
 opencv-python
 tqdm
+pandas
+streamlit>=1.30
+plotly>=5.15
+matplotlib>=3.7
+seaborn>=0.12

@@ -5,9 +5,9 @@ import pydicom
 import numpy as np
 
 # ------------------ PATHS ------------------
-ROOT = r"/workspace/data/Soft-tissue-Sarcoma"
-STUDY_LIST_CSV = r"/workspace/data/study_list.csv"
-OUTPUT_CSV = "/workspace/data/index.csv"
+ROOT = r"C:\Users\harib\OneDrive\Desktop\sts\data\Soft-tissue-Sarcoma"
+STUDY_LIST_CSV = r"C:\Users\harib\OneDrive\Desktop\sts\data\study_list.csv"
+OUTPUT_CSV = r"C:\Users\harib\OneDrive\Desktop\sts\data\index.csv"
 
 # ------------------ LOAD STUDY LIST ------------------
 study_df = pd.read_csv(STUDY_LIST_CSV)
