@@ -1,7 +1,12 @@
+import sys
+import os
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # sts/
+sys.path.append(_SCRIPT_DIR)
+
 import torch
 import pandas as pd
 import numpy as np
-import os
 import cv2
 import pydicom
 import torch.nn.functional as F
@@ -12,30 +17,40 @@ import config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ------------------------------------------------
-# PATHS
+# PATHS  (all anchored to repo root via config)
 # ------------------------------------------------
 
-INDEX_CSV = r"C:\Users\harib\OneDrive\Desktop\Projects\Main project\data\sts_index_all_sequences.csv"
-CLASS_CSV = r"C:\Users\harib\OneDrive\Desktop\sts\data\study_list.csv"
+_REPO_ROOT = _SCRIPT_DIR   # fewshot_inter.py lives in sts/
 
-MODEL_PATH = "weights/siamese_vit_fewshot9.pth"
-EMBED_PATH = "embeddings/support_embeddings.pt"
+INDEX_CSV  = os.path.join(_REPO_ROOT, "data", "index.csv")
+MODEL_PATH = os.path.join(_REPO_ROOT, "weights", "siamese_vit_fewshot9.pth")
+EMBED_PATH = os.path.join(_REPO_ROOT, "embeddings", "support_embeddings.pt")
+
+# Root of the actual DICOM data on this machine
+DICOM_ROOT = r"C:\Users\user\Desktop\dataset\Soft-tissue-Sarcoma"
+
+# Harib's original prefix in the CSV dicom_dir column
+_HARIB_PREFIX = "/mnt/c/Users/harib/OneDrive/Desktop/Projects/Main project/manifest-MjbMt99Q1553106146386120388/Soft-tissue-Sarcoma"
+
+def remap_dicom_dir(raw_path: str) -> str:
+    """Replace harib's hardcoded prefix with the local DICOM_ROOT."""
+    raw_path = raw_path.replace("/", os.sep)
+    harib    = _HARIB_PREFIX.replace("/", os.sep)
+    if raw_path.startswith(harib):
+        return DICOM_ROOT + raw_path[len(harib):]
+    return raw_path   # already correct or unknown format
 
 # ------------------------------------------------
 # LOAD MODEL
 # ------------------------------------------------
 
 model = ViTContainer(config.EMBED_DIM)
-
-model.load_state_dict(
-    torch.load("weights/siamese_vit_fewshot9.pth", map_location=device)
-)
-
+model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
 model = model.to(device)
 model.eval()
 
 # ------------------------------------------------
-# MRI PREPROCESSING (same as MRIDataset)
+# MRI PREPROCESSING  (same as MRIDataset)
 # ------------------------------------------------
 
 def load_middle_slice(dicom_dir):
@@ -49,20 +64,17 @@ def load_middle_slice(dicom_dir):
     if len(files) == 0:
         return None
 
-    dcm_path = files[len(files)//2]
+    dcm_path = files[len(files) // 2]
 
     try:
         dcm = pydicom.dcmread(dcm_path)
         img = dcm.pixel_array.astype(np.float32)
-    except:
+    except Exception:
         return None
 
     img = (img - img.mean()) / (img.std() + 1e-8)
-
-    img = cv2.resize(img, (224,224))
-
-    img = img[None,:,:]
-
+    img = cv2.resize(img, (224, 224))
+    img = img[None, :, :]
     img = torch.from_numpy(img).float().unsqueeze(0)
 
     return img.to(device)
@@ -72,20 +84,10 @@ def load_middle_slice(dicom_dir):
 # ------------------------------------------------
 
 def load_dataset():
-
-    index_df = pd.read_csv(INDEX_CSV)
-
-    class_df = pd.read_csv(CLASS_CSV)
-
-    class_df = class_df.rename(columns={
-        "Patient ID":"patient_id",
-        "Histological type":"label"
-    })
-
-    df = index_df.merge(class_df, on="patient_id")
-
-    print("Merged dataset size:", len(df))
-
+    df = pd.read_csv(INDEX_CSV)
+    df["dicom_dir"] = df["dicom_dir"].apply(remap_dicom_dir)
+    df = df.rename(columns={"histological_type": "label"})
+    print("Dataset size:", len(df))
     return df
 
 # ------------------------------------------------
@@ -96,9 +98,7 @@ def build_support_embeddings(df):
 
     support_embeddings = {}
 
-    grouped = df.groupby("label")
-
-    for label, group in grouped:
+    for label, group in df.groupby("label"):
 
         embeddings = []
 
@@ -123,9 +123,7 @@ def build_support_embeddings(df):
             continue
 
         embeddings = torch.cat(embeddings)
-
-        prototype = embeddings.mean(0)
-
+        prototype  = embeddings.mean(0)
         support_embeddings[label] = prototype.cpu()
 
         print(f"{label} -> {len(embeddings)} samples")
@@ -141,34 +139,22 @@ def get_support_embeddings():
     if os.path.exists(EMBED_PATH):
 
         print("Loading saved embeddings...")
-
-        data = torch.load(EMBED_PATH)
-
+        data   = torch.load(EMBED_PATH)
         embeddings = data["embeddings"]
-        labels = data["labels"]
+        labels     = data["labels"]
 
         support_embeddings = {}
-
         for label in set(labels):
-
-            idx = [i for i,l in enumerate(labels) if l == label]
-
+            idx       = [i for i, l in enumerate(labels) if l == label]
             class_emb = embeddings[idx]
-
-            prototype = class_emb.mean(0)
-
-            support_embeddings[label] = prototype
+            support_embeddings[label] = class_emb.mean(0)
 
     else:
 
         print("Building embeddings (first run)...")
-
         df = load_dataset()
-
         support_embeddings = build_support_embeddings(df)
-
         torch.save(support_embeddings, EMBED_PATH)
-
         print("Embeddings saved to:", EMBED_PATH)
 
     return support_embeddings
@@ -188,13 +174,9 @@ def predict(query_dir, support_embeddings):
     best_score = -1
 
     for label, emb in support_embeddings.items():
-
-        emb = emb.to(device)
-
+        emb   = emb.to(device)
         score = F.cosine_similarity(query_emb, emb.unsqueeze(0)).item()
-
         if score > best_score:
-
             best_score = score
             best_class = label
 
@@ -204,12 +186,14 @@ def predict(query_dir, support_embeddings):
 # RUN
 # ------------------------------------------------
 
-support_embeddings = get_support_embeddings()
+if __name__ == "__main__":
 
-print("Available classes:", list(support_embeddings.keys()))
+    support_embeddings = get_support_embeddings()
+    print("Available classes:", list(support_embeddings.keys()))
 
-query_dir = r"C:\Users\harib\OneDrive\Desktop\sts\data\test-img\STS_034\09-28-2002-NA-MSKHIP-72755\4.000000-AXIAL STIR-50167"
-pred, score = predict(query_dir, support_embeddings)
+    # Replace this with your actual query folder
+    query_dir = input("Enter query DICOM folder path: ").strip()
+    pred, score = predict(query_dir, support_embeddings)
 
-print("\nPrediction:", pred)
-print("Similarity:", score)
+    print("\nPrediction:", pred)
+    print("Similarity:", score)

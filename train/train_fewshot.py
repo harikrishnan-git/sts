@@ -1,5 +1,10 @@
+import os
 import torch
 from losses.prototypical_loss import prototypical_loss_acc
+
+_TRAIN_DIR  = os.path.dirname(os.path.abspath(__file__))   # sts/train/
+_REPO_ROOT  = os.path.abspath(os.path.join(_TRAIN_DIR, ".."))  # sts/
+_WEIGHT_DIR = os.path.join(_REPO_ROOT, "weights")
 
 
 def train_fewshot(
@@ -8,12 +13,18 @@ def train_fewshot(
     optimizer,
     device,
     epochs,
-    loss_fn = prototypical_loss_acc,
+    loss_fn=prototypical_loss_acc,
     loss_name="proto",
-    save_path="/workspace/weights/"
+    save_path=None                       # if None, defaults to sts/weights/
 ):
+    if save_path is None:
+        save_path = _WEIGHT_DIR
+
+    os.makedirs(save_path, exist_ok=True)
+
     model.to(device)
     history = []
+
     for ep in range(epochs):
         total_loss = 0.0
         total_acc  = 0.0
@@ -30,7 +41,7 @@ def train_fewshot(
 
             loss, acc = loss_fn(
                 support_emb, support_y,
-                query_emb, query_y
+                query_emb,   query_y
             )
 
             optimizer.zero_grad()
@@ -41,13 +52,13 @@ def train_fewshot(
             total_acc  += acc.item()
 
         avg_loss = total_loss / len(loader)
-        avg_acc  = total_acc / len(loader)
+        avg_acc  = total_acc  / len(loader)
         history.append(avg_acc)
 
         print(f"Epoch {ep+1}/{epochs} | Loss: {avg_loss:.4f} | Acc: {avg_acc:.4f}")
 
-        torch.save(model.state_dict(), save_path + f"siamese_vit_fewshot{ep}.pth")
-        print(f"Model saved to: {save_path}siamese_vit_fewshot{ep}.pth")
+        ckpt = os.path.join(save_path, f"siamese_vit_fewshot{ep}.pth")
+        torch.save(model.state_dict(), ckpt)
+        print(f"Model saved to: {ckpt}")
+
     return history
-
-

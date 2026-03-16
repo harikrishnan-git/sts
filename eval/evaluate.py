@@ -14,17 +14,23 @@ from models.ViTContainer import ViTContainer
 from dataset.mri_dataset import MRIDataset
 
 
-# ---------------- CONFIG ----------------
-MODEL_PATH = "weights/siamese_vit_fewshot9.pth"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# ---------------- PATHS (all absolute, anchored to this file) ----------------
+_EVAL_DIR  = os.path.dirname(os.path.abspath(__file__))   # sts/eval/
+_REPO_ROOT = os.path.abspath(os.path.join(_EVAL_DIR, ".."))  # sts/
 
-N_WAY = 3
-K_SHOT = 1
+MODEL_PATH = os.path.join(_REPO_ROOT, "weights", "siamese_vit_fewshot9.pth")
+OUTPUT_DIR = os.path.join(_REPO_ROOT, "eval_results")
+CSV_PATH   = os.path.join(_REPO_ROOT, "data", "index.csv")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ---------------- CONFIG ----------------
+DEVICE  = "cuda" if torch.cuda.is_available() else "cpu"
+N_WAY   = 3
+K_SHOT  = 1
 Q_QUERY = 1
 EPISODES = 200
-
-OUTPUT_DIR = "eval_results/"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ---------------- DATA UTILS ----------------
@@ -65,7 +71,7 @@ def sample_episode(dataset, class_to_indices):
         )
 
         support_idx = indices[:K_SHOT]
-        query_idx = indices[K_SHOT:]
+        query_idx   = indices[K_SHOT:]
 
         for idx in support_idx:
             x, _ = dataset[idx]
@@ -91,7 +97,7 @@ def proto_classify(model, support_x, support_y, query_x):
     with torch.no_grad():
 
         support_emb = model.encode(support_x)
-        query_emb = model.encode(query_x)
+        query_emb   = model.encode(query_x)
 
         prototypes = []
 
@@ -102,7 +108,7 @@ def proto_classify(model, support_x, support_y, query_x):
         prototypes = torch.stack(prototypes)
 
         logits = torch.matmul(query_emb, prototypes.T)
-        preds = torch.argmax(logits, dim=1)
+        preds  = torch.argmax(logits, dim=1)
 
     return preds, query_emb.cpu(), prototypes.cpu()
 
@@ -114,7 +120,7 @@ def save_confusion_matrix(labels, preds):
 
     cm = confusion_matrix(labels, preds)
 
-    plt.figure(figsize=(8,6))
+    plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
     plt.title("Confusion Matrix")
     plt.savefig(path)
@@ -126,7 +132,7 @@ def save_confusion_matrix(labels, preds):
 # ---------------- MAIN EVAL ----------------
 def evaluate():
 
-    dataset = MRIDataset(csv_path="../data/index.csv")
+    dataset = MRIDataset(csv_path=CSV_PATH)
 
     class_to_indices = build_class_to_indices(dataset)
 
@@ -134,38 +140,38 @@ def evaluate():
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.eval()
 
-    all_preds = []
+    all_preds  = []
     all_labels = []
 
     correct = 0
-    total = 0
+    total   = 0
 
     for _ in tqdm(range(EPISODES)):
 
         support_x, support_y, query_x, query_y = sample_episode(dataset, class_to_indices)
 
         support_x = support_x.to(DEVICE)
-        query_x = query_x.to(DEVICE)
-        query_y = query_y.to(DEVICE)
+        query_x   = query_x.to(DEVICE)
+        query_y   = query_y.to(DEVICE)
 
         preds, _, _ = proto_classify(model, support_x, support_y, query_x)
 
         correct += (preds.to(DEVICE) == query_y).sum().item()
-        total += query_y.size(0)
+        total   += query_y.size(0)
 
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(query_y.cpu().numpy())
 
     acc = correct / total
 
-    cm = confusion_matrix(all_labels, all_preds)
+    cm     = confusion_matrix(all_labels, all_preds)
     report = classification_report(all_labels, all_preds)
 
     cm_path = save_confusion_matrix(all_labels, all_preds)
 
     results = {
-        "accuracy": float(acc),
-        "confusion_matrix": cm.tolist(),
+        "accuracy":              float(acc),
+        "confusion_matrix":      cm.tolist(),
         "classification_report": report,
         "confusion_matrix_plot": cm_path
     }

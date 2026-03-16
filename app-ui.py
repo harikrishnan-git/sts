@@ -2,8 +2,9 @@ import sys
 import os
 
 # ── Allow imports from parent repo: dataset/, models/, eval/, config.py ──────
-# app.py lives in sts/ui/ — go one level up to reach sts/
-sys.path.append(os.path.abspath(".."))
+_UI_DIR    = os.path.dirname(os.path.abspath(__file__))    # sts/ui/
+_REPO_ROOT = os.path.abspath(os.path.join(_UI_DIR, "..")) # sts/
+sys.path.append(_REPO_ROOT)
 
 import cv2
 import subprocess
@@ -28,135 +29,94 @@ import config
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MODEL_PATH = r"weights/siamese_vit_fewshot9.pth"
-SUPPORT_EMB_PATH = r"embeddings/support_embeddings.pt"
+MODEL_PATH       = os.path.join(_REPO_ROOT, "weights",    "siamese_vit_fewshot9.pth")
+SUPPORT_EMB_PATH = os.path.join(_REPO_ROOT, "embeddings", "support_embeddings.pt")
 
 
 @st.cache_resource
 def load_model():
-
     model = ViTContainer(config.EMBED_DIM)
-
-    model.load_state_dict(
-        torch.load(MODEL_PATH, map_location=DEVICE)
-    )
-
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.to(DEVICE)
     model.eval()
-
     return model
 
 
 @st.cache_resource
 def load_support():
-
-    data = torch.load(SUPPORT_EMB_PATH)
-
+    data       = torch.load(SUPPORT_EMB_PATH)
     embeddings = data["embeddings"]
-    labels = data["labels"]
-
+    labels     = data["labels"]
     support_embeddings = {}
-
     for label in set(labels):
-
-        idx = [i for i,l in enumerate(labels) if l == label]
-
+        idx   = [i for i, l in enumerate(labels) if l == label]
         proto = embeddings[idx].mean(0)
-
         support_embeddings[label] = proto
-
     return support_embeddings
 
 
-model = load_model()
+model              = load_model()
 support_embeddings = load_support()
 
+
 def preprocess_dicom(uploaded_file):
-
     dcm = pydicom.dcmread(uploaded_file)
-
     img = dcm.pixel_array.astype(np.float32)
-
     img = (img - img.mean()) / (img.std() + 1e-8)
-
-    img = cv2.resize(img, (224,224))
-
-    img = img[None,:,:]
-
+    img = cv2.resize(img, (224, 224))
+    img = img[None, :, :]
     img = torch.from_numpy(img).float().unsqueeze(0)
-
     return img.to(DEVICE)
 
+
 def predict(img_tensor):
-
     with torch.no_grad():
-
         query_emb = model.encode(img_tensor)
-
     best_class = None
     best_score = -float("inf")
-
     for label, emb in support_embeddings.items():
-
-        emb = emb.to(DEVICE)
-
+        emb   = emb.to(DEVICE)
         score = F.cosine_similarity(query_emb, emb.unsqueeze(0)).item()
-
         if score > best_score:
             best_score = score
             best_class = label
-
     return best_class, best_score
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PATHS  (relative to sts/ui/ where you run `streamlit run app.py`)
-# ══════════════════════════════════════════════════════════════════════════════
-DATASET_PATH  = "../data/study_list.csv"
-EVAL_SCRIPT = "eval/evaluate.py"   # subprocess target
-
-CLASS_COLORS  = ["#1a56db", "#0891b2", "#7c3aed", "#059669", "#d97706",
-                 "#e11d48", "#0d9488", "#b45309"]
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1.  DYNAMIC EVALUATION METRICS  — runs eval/evaluate.py via subprocess
+# PATHS
+# ══════════════════════════════════════════════════════════════════════════════
+DATASET_PATH = os.path.join(_REPO_ROOT, "data", "study_list.csv")
+EVAL_SCRIPT  = os.path.join(_REPO_ROOT, "eval", "evaluate.py")
+
+CLASS_COLORS = ["#1a56db", "#0891b2", "#7c3aed", "#059669", "#d97706",
+                "#e11d48", "#0d9488", "#b45309"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1.  DYNAMIC EVALUATION METRICS
 # ══════════════════════════════════════════════════════════════════════════════
 def get_eval_metrics():
-    """
-    Runs `python ../eval/evaluate.py`, captures stdout, parses:
-      - accuracy  (float)
-      - confusion matrix  (np.ndarray)
-      - full stdout  (used as classification report display)
-      - per-class f1 scores  (dict  label -> f1)
-    Returns a dict; all values are None on failure.
-    """
     result = subprocess.run(
         [sys.executable, EVAL_SCRIPT],
         capture_output=True,
         text=True,
-        cwd=os.path.abspath("../sts")        # run from repo root so relative paths inside evaluate.py work
+        cwd=_REPO_ROOT
     )
     output  = result.stdout
     stderr  = result.stderr
     success = result.returncode == 0
 
-    # ── Accuracy ─────────────────────────────────────────────────────────────
-    # Matches:  Accuracy: 0.9423   |   accuracy: 94.23   |   Accuracy = 0.94
-    acc_match = re.search(
-        r'(?i)accuracy[\s:=]+([0-9]+\.?[0-9]*)', output
-    )
-    accuracy = None
+    acc_match = re.search(r'(?i)accuracy[\s:=]+([0-9]+\.?[0-9]*)', output)
+    accuracy  = None
     if acc_match:
-        raw = float(acc_match.group(1))
-        accuracy = raw / 100.0 if raw > 1.0 else raw   # handle 94.2 vs 0.942
+        raw      = float(acc_match.group(1))
+        accuracy = raw / 100.0 if raw > 1.0 else raw
 
-    # ── Confusion Matrix ──────────────────────────────────────────────────────
-    # Matches numpy-style:  [[47  2  0] [1 51  1] ...]
     cm = None
     cm_match = re.search(r'(\[\s*\[.*?\]\s*\])', output, re.S)
     if cm_match:
         try:
-            # Replace whitespace-only separators with commas for eval()
             cm_text = re.sub(r'\s+', ' ', cm_match.group(1).strip())
             cm_text = re.sub(r'(?<=\d)\s+(?=\d|-)', ', ', cm_text)
             cm_text = re.sub(r'\]\s+\[', '], [', cm_text)
@@ -164,14 +124,12 @@ def get_eval_metrics():
         except Exception:
             cm = None
 
-    # ── Per-class F1 from classification report ───────────────────────────────
-    # Parses lines like:   LPS       0.96  0.94  0.95      50
     per_class = {}
     for line in output.splitlines():
         parts = line.split()
         if len(parts) >= 5:
             try:
-                label = parts[0]
+                label       = parts[0]
                 precision_v = float(parts[1])
                 recall_v    = float(parts[2])
                 f1_v        = float(parts[3])
@@ -187,90 +145,74 @@ def get_eval_metrics():
                 continue
 
     return {
-        "accuracy":   accuracy,
-        "cm":         cm,
-        "report":     output,
-        "stderr":     stderr,
-        "per_class":  per_class,
-        "success":    success,
+        "accuracy":  accuracy,
+        "cm":        cm,
+        "report":    output,
+        "stderr":    stderr,
+        "per_class": per_class,
+        "success":   success,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2.  DATASET INFO  — from MRIDataset or CSV fallback
+# 2.  DATASET INFO
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def load_dataset_info():
-    # ── Real MRIDataset ───────────────────────────────────────────────────────
     try:
-        from dataset.mri_dataset import MRIDataset
-        dataset       = MRIDataset(DATASET_PATH)
-        total_images  = len(dataset)
-        class_names   = list(dataset.classes)
-        total_classes = len(class_names)
-        if hasattr(dataset, "class_counts"):
-            class_counts = [dataset.class_counts[c] for c in class_names]
-        else:
-            class_counts = [total_images // total_classes] * total_classes
-        return total_images, total_classes, class_names, class_counts, "MRIDataset"
-    except Exception:
-        pass
-
-    # ── CSV fallback ──────────────────────────────────────────────────────────
-    try:
-        df = pd.read_csv(DATASET_PATH)
-        label_col = next(
-            (c for c in df.columns
-             if c.lower() in ("label", "class", "tumor_type", "category", "diagnosis")),
-            df.columns[-1]
-        )
+        df        = pd.read_csv(DATASET_PATH)
+        label_col = "Histological type"
+        if label_col not in df.columns:
+            label_col = next(
+                (c for c in df.columns
+                 if c.lower() in ("histological type", "histological_type",
+                                  "label", "class", "tumor_type", "category", "diagnosis")),
+                df.columns[-1]
+            )
         total_images  = len(df)
-        class_names   = sorted(df[label_col].unique().tolist())
+        class_names   = sorted(df[label_col].dropna().unique().tolist())
         total_classes = len(class_names)
         class_counts  = [int((df[label_col] == c).sum()) for c in class_names]
-        return total_images, total_classes, class_names, class_counts, f"CSV ({label_col})"
+        return total_images, total_classes, class_names, class_counts, "study_list.csv"
     except Exception:
         pass
-
-    # ── Demo fallback ─────────────────────────────────────────────────────────
     return (
-        248, 5,
-        ["LPS", "LMS", "SS", "MFH", "DFSP"],
-        [50, 53, 48, 52, 45],
+        248, 3,
+        ["leiomyosarcoma", "liposarcoma", "other"],
+        [85, 90, 73],
         "demo (CSV not found)"
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3.  MODEL ARCHITECTURE  — from SiameseViT or descriptive fallback
+# 3.  MODEL ARCHITECTURE
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def load_model_architecture():
     try:
         from models.siamese import SiameseViT
-        import config as cfg
-        model = SiameseViT(cfg.EMBED_DIM)
-        return str(model), True
+        m = SiameseViT(config.EMBED_DIM)
+        return str(m), True
     except Exception:
         pass
-
-    fallback = """SiameseViT(
-  embed_dim = 512
+    embed_dim = config.EMBED_DIM
+    fallback = f"""SiameseViT(
+  embed_dim = {embed_dim}
   (vit_encoder): VisionTransformer(
     patch_size=16, image_size=224, num_layers=12, num_heads=8
-    (patch_embed): PatchEmbedding(in_channels=1, embed_dim=512)
+    (patch_embed): PatchEmbedding(in_channels=1, embed_dim={embed_dim})
     (transformer): Sequential(
       (0-11): TransformerBlock(
-        (attn): MultiHeadSelfAttention(heads=8, dim=512)
-        (ff):   MLP(512 -> 2048 -> 512)
-        (norm1, norm2): LayerNorm(512)
+        (attn): MultiHeadSelfAttention(heads=8, dim={embed_dim})
+        (ff):   MLP({embed_dim} -> {embed_dim*4} -> {embed_dim})
+        (norm1, norm2): LayerNorm({embed_dim})
       )
     )
-    (cls_token): Parameter(1, 1, 512)
-    (pos_embed): Parameter(1, 197, 512)
+    (cls_token): Parameter(1, 1, {embed_dim})
+    (pos_embed): Parameter(1, 197, {embed_dim})
   )
   (projection_head): Sequential(
-    Linear(512 -> 256), ReLU(), Linear(256 -> 128)
+    Linear({embed_dim} -> {embed_dim//2}), ReLU(), Linear({embed_dim//2} -> 128)
   )
   (distance_fn): CosineSimilarity(dim=1)
 )"""
@@ -278,32 +220,24 @@ def load_model_architecture():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4.  TRAINING LOSS  — from main.py log file if available
+# 4.  TRAINING LOSS
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def load_training_loss():
-    """
-    Tries to parse ../training_log.txt for lines like:
-        Epoch 1/100 | Loss: 1.43 | Val Loss: 1.72
-    Falls back to smooth demo curves seeded for reproducibility.
-    """
-    log_path = os.path.abspath("../training_log.txt")
+    log_path = os.path.join(_REPO_ROOT, "training_log.txt")
     if os.path.exists(log_path):
         train_losses, val_losses = [], []
         with open(log_path) as f:
             for line in f:
                 t = re.search(r'(?i)(?:train[\s_]?)?loss[:\s]+([0-9.]+)', line)
                 v = re.search(r'(?i)val[\s_]?loss[:\s]+([0-9.]+)', line)
-                if t:
-                    train_losses.append(float(t.group(1)))
-                if v:
-                    val_losses.append(float(v.group(1)))
+                if t: train_losses.append(float(t.group(1)))
+                if v: val_losses.append(float(v.group(1)))
         if train_losses:
             ep = np.arange(1, len(train_losses) + 1)
             vl = np.array(val_losses) if val_losses else None
             return ep, np.array(train_losses), vl, "training_log.txt"
 
-    # Demo curves
     np.random.seed(42)
     ep = np.arange(1, 101)
     tl = 1.8 * np.exp(-3.5 * ep / 99) + 0.042 + np.random.randn(100) * 0.018
@@ -330,7 +264,6 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 #MainMenu{visibility:hidden;} footer{visibility:hidden;} .stDeployButton{display:none;}
 .stApp { background: #f8fafc; }
-
 .header-bar {
     background: white; border-bottom: 1px solid #e2e8f0;
     padding: 14px 0 12px; margin: -1rem -1rem 0;
@@ -364,7 +297,6 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .meta-item-val { font-size:14px; font-weight:600; color:#0f172a; margin-top:3px; font-family:'DM Mono',monospace; }
 .info-step { background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; padding:11px 14px; margin-bottom:7px; font-size:13px; color:#0c4a6e; }
 .warning-box { margin-top:10px; padding:10px 12px; border-radius:8px; background:#fef3c7; border:1px solid #fde68a; font-size:11.5px; color:#92400e; }
-.eval-source { padding:2px 10px; border-radius:4px; font-size:11px; font-family:monospace; font-weight:500; }
 [data-testid="metric-container"] {
     background:white; border:1px solid #e2e8f0; border-radius:12px;
     padding:16px 20px; box-shadow:0 1px 3px rgba(0,0,0,0.06);
@@ -382,7 +314,8 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 [data-testid="stFileUploader"] { border-radius:12px !important; background:#f8fafc !important; }
 .stSelectbox > div > div, .stTextInput > div > div > input {
     border-radius:8px !important; border-color:#e2e8f0 !important;
-    font-family:'DM Sans',sans-serif !important; background:#f8fafc !important;
+    font-family:'DM Sans',sans-serif !important; background:#ffffff !important;
+    color:#0f172a !important;
 }
 .stTextArea textarea { font-family:'DM Mono',monospace !important; font-size:12px !important; background:#0f172a !important; color:#e2e8f0 !important; }
 .footer { border-top:1px solid #e2e8f0; margin-top:40px; padding:16px 0; display:flex; justify-content:space-between; font-size:11.5px; color:#94a3b8; }
@@ -398,14 +331,12 @@ model_arch_str, arch_is_real  = load_model_architecture()
 epochs, train_loss, val_loss, loss_source = load_training_loss()
 best_ep = int(np.argmin(val_loss)) + 1 if val_loss is not None else "—"
 
-# Extend color list to cover any number of classes
 while len(CLASS_COLORS) < len(class_names):
     CLASS_COLORS.append("#64748b")
 class_colors = CLASS_COLORS[:len(class_names)]
 
-# Session state
-if "eval_result"    not in st.session_state: st.session_state.eval_result    = None
-if "upload_result"  not in st.session_state: st.session_state.upload_result  = None
+if "eval_result"   not in st.session_state: st.session_state.eval_result   = None
+if "upload_result" not in st.session_state: st.session_state.upload_result = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -471,7 +402,7 @@ with col_upload:
 
     c1, c2 = st.columns(2)
     with c1:
-        patient_id = st.text_input("Patient ID", placeholder="e.g. PT-2024-001")
+        patient_id = st.text_input("Patient ID", placeholder="e.g. STS_013")
     with c2:
         mri_seq = st.selectbox("MRI Sequence",
             ["", "T1-weighted", "T2-weighted", "STIR", "T1 post-contrast", "DWI"])
@@ -484,35 +415,28 @@ with col_upload:
         else:
             with st.spinner("Loading image and extracting metadata…"):
                 time.sleep(0.6)
-            # --------------------------
-            # Run model prediction
-            # --------------------------
-
             try:
-                ds = pydicom.dcmread(uploaded_file)
-
+                ds          = pydicom.dcmread(uploaded_file)
                 pixel_array = ds.pixel_array
-
-                # normalize for display
                 pixel_array = (pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min())
                 pixel_array = (pixel_array * 255).astype(np.uint8)
-
-                img = Image.fromarray(pixel_array)
-
-                w, h = img.size
-                mode = img.mode
-                channels = 1 if len(img.getbands()) == 1 else len(img.getbands())
-
-                img_tensor = preprocess_dicom(img)
-
+                img         = Image.fromarray(pixel_array)
+                w, h        = img.size
+                mode        = img.mode
+                channels    = 1 if len(img.getbands()) == 1 else len(img.getbands())
+                img_tensor  = preprocess_dicom(uploaded_file)
             except Exception as e:
                 st.error(f"Inference failed: {e}")
                 w, h, mode, channels = 224, 224, "L", 1
+                img_tensor = None
 
-            pred, score = predict(img_tensor)
+            pred, score = (None, None)
+            if img_tensor is not None:
+                pred, score = predict(img_tensor)
+
             st.session_state.upload_result = {
                 "filename"  : uploaded_file.name,
-                "patient_id": patient_id or "PT-—",
+                "patient_id": patient_id or "—",
                 "seq"       : mri_seq or "Not specified",
                 "width": w, "height": h,
                 "mode": mode, "channels": channels,
@@ -520,7 +444,7 @@ with col_upload:
                 "file_size" : f"{uploaded_file.size / 1024:.1f} KB",
                 "image_obj" : uploaded_file,
                 "prediction": pred,
-                "confidence": score
+                "confidence": score,
             }
             st.rerun()
 
@@ -549,8 +473,8 @@ with col_result:
           &nbsp;·&nbsp; Mode: {r['mode']} &nbsp;·&nbsp; Channels: {r['channels']}</div>
         <div class="info-step">⚙️ <strong>Normalised slice extracted</strong>
           — resized to 224 × 224, intensity [0, 1]</div>
-        <div class="info-step">🚀 <strong>Ready for model evaluation</strong>
-          — pass to SiameseViT for few-shot inference</div>
+        <div class="info-step">🚀 <strong>Inference complete</strong>
+          — SiameseViT few-shot prediction</div>
         <div class="meta-grid" style="margin-top:10px;">
           <div class="meta-item">
             <div class="meta-item-label">Patient ID</div>
@@ -570,25 +494,24 @@ with col_result:
           </div>
           <div class="meta-item">
             <div class="meta-item-label">Prediction</div>
-            <div class="meta-item-val">{r.get('prediction','—')}</div>
-            </div>
-
-            <div class="meta-item">
+            <div class="meta-item-val">{r.get('prediction') or '—'}</div>
+          </div>
+          <div class="meta-item">
             <div class="meta-item-label">Confidence</div>
             <div class="meta-item-val">
-                {f"{r.get('confidence',0)*100:.2f}%" if r.get('confidence') else "—"}
+              {f"{r.get('confidence', 0)*100:.2f}%" if r.get('confidence') is not None else '—'}
             </div>
+          </div>
         </div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — LIVE EVALUATION  (subprocess → eval/evaluate.py)
+# SECTION 2 — LIVE EVALUATION
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 st.markdown('<div class="section-label">Model Evaluation — Live from eval/evaluate.py</div>',
             unsafe_allow_html=True)
 
-# ── Run evaluation button ─────────────────────────────────────────────────────
 eval_col, _ = st.columns([1, 3])
 with eval_col:
     run_eval = st.button("▶  Run Evaluation Script", key="eval_btn")
@@ -598,7 +521,6 @@ if run_eval:
         st.session_state.eval_result = get_eval_metrics()
     st.rerun()
 
-# ── Display results ───────────────────────────────────────────────────────────
 ev = st.session_state.eval_result
 
 if ev is None:
@@ -615,14 +537,11 @@ else:
     if not ev["success"]:
         st.error(f"**eval/evaluate.py exited with an error.**\n\n```\n{ev['stderr'][:600]}\n```")
 
-    # ── Top metrics row ───────────────────────────────────────────────────────
     accuracy  = ev["accuracy"]
     per_class = ev["per_class"]
 
-    # Derive precision / recall / f1 from per-class dict if available
     if per_class:
-        valid = [v for v in per_class.values()
-                 if isinstance(v, dict) and "f1" in v]
+        valid         = [v for v in per_class.values() if isinstance(v, dict) and "f1" in v]
         avg_precision = float(np.mean([v["precision"] for v in valid])) if valid else None
         avg_recall    = float(np.mean([v["recall"]    for v in valid])) if valid else None
         avg_f1        = float(np.mean([v["f1"]        for v in valid])) if valid else None
@@ -631,10 +550,7 @@ else:
 
     m1, m2, m3, m4 = st.columns(4, gap="medium")
     with m1:
-        if accuracy is not None:
-            st.metric("Model Accuracy",  f"{accuracy*100:.2f}%")
-        else:
-            st.metric("Model Accuracy",  "—")
+        st.metric("Model Accuracy",    f"{accuracy*100:.2f}%" if accuracy is not None else "—")
     with m2:
         st.metric("Precision (macro)", f"{avg_precision*100:.2f}%" if avg_precision else "—")
     with m3:
@@ -644,7 +560,6 @@ else:
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # ── Confusion Matrix + Classification Report ──────────────────────────────
     cm = ev["cm"]
     col_cm, col_report = st.columns([1, 1], gap="medium")
 
@@ -660,24 +575,15 @@ else:
         </div>""", unsafe_allow_html=True)
 
         if cm is not None:
-            n = cm.shape[0]
+            n           = cm.shape[0]
             tick_labels = class_names[:n] if len(class_names) >= n else [str(i) for i in range(n)]
-
             fig_cm, ax_cm = plt.subplots(figsize=(5.5, 4.2))
             fig_cm.patch.set_facecolor("white")
             ax_cm.set_facecolor("white")
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt="d",
-                cmap="Blues",
-                xticklabels=tick_labels,
-                yticklabels=tick_labels,
-                ax=ax_cm,
-                linewidths=0.5,
-                linecolor="#e2e8f0",
-                cbar_kws={"shrink": 0.8},
-            )
+            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                        xticklabels=tick_labels, yticklabels=tick_labels,
+                        ax=ax_cm, linewidths=0.5, linecolor="#e2e8f0",
+                        cbar_kws={"shrink": 0.8})
             ax_cm.set_xlabel("Predicted", fontsize=11, labelpad=8)
             ax_cm.set_ylabel("Actual",    fontsize=11, labelpad=8)
             ax_cm.tick_params(labelsize=10)
@@ -685,8 +591,7 @@ else:
             st.pyplot(fig_cm, use_container_width=True)
             plt.close(fig_cm)
         else:
-            st.warning("Could not parse confusion matrix from script output. "
-                       "Ensure evaluate.py prints it in numpy format: `[[a b] [c d]]`")
+            st.warning("Could not parse confusion matrix from script output.")
 
     with col_report:
         st.markdown("""
@@ -700,19 +605,13 @@ else:
         </div>""", unsafe_allow_html=True)
 
         report_text = ev["report"].strip() if ev["report"] else "(no output)"
-        st.text_area(
-            label="",
-            value=report_text,
-            height=320,
-            key="report_area",
-            label_visibility="collapsed",
-        )
+        st.text_area(label="", value=report_text, height=320,
+                     key="report_area", label_visibility="collapsed")
 
         if ev["stderr"].strip():
             with st.expander("⚠ stderr output"):
                 st.code(ev["stderr"], language="text")
 
-    # ── Per-class accuracy bar chart (from parsed F1 scores) ─────────────────
     if per_class:
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         st.markdown("""
@@ -739,18 +638,15 @@ else:
         ))
         fig_pc.update_layout(
             margin=dict(l=0, r=0, t=30, b=0), height=260,
-            yaxis=dict(
-                range=[max(0, min(pc_f1) - 5), 103],
-                title="F1 Score (%)", gridcolor="#f1f5f9",
-                ticksuffix="%", tickfont=dict(size=10),
-            ),
+            yaxis=dict(range=[max(0, min(pc_f1) - 5), 103],
+                       title="F1 Score (%)", gridcolor="#f1f5f9",
+                       ticksuffix="%", tickfont=dict(size=10)),
             xaxis=dict(showgrid=False, tickfont=dict(size=12)),
             paper_bgcolor="white", plot_bgcolor="white",
             font=dict(family="DM Sans"), showlegend=False,
         )
         st.plotly_chart(fig_pc, use_container_width=True, config={"displayModeBar": False})
 
-    # Timestamp of last eval run
     st.caption(f"Last evaluated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
@@ -799,12 +695,9 @@ st.plotly_chart(fig_loss, use_container_width=True, config={"displayModeBar": Fa
 
 tc1, tc2, tc3 = st.columns(3)
 for col, val, label, color in [
-    (tc1, f"{float(train_loss[-1]):.4f}",
-          "Final Train Loss",  "#1a56db"),
-    (tc2, f"{float(val_loss[-1]):.4f}" if val_loss is not None else "—",
-          "Final Val Loss",    "#f59e0b"),
-    (tc3, f"Ep. {best_ep}",
-          "Best Checkpoint",   "#059669"),
+    (tc1, f"{float(train_loss[-1]):.4f}", "Final Train Loss", "#1a56db"),
+    (tc2, f"{float(val_loss[-1]):.4f}" if val_loss is not None else "—", "Final Val Loss", "#f59e0b"),
+    (tc3, f"Ep. {best_ep}", "Best Checkpoint", "#059669"),
 ]:
     with col:
         st.markdown(f"""
@@ -816,16 +709,10 @@ for col, val, label, color in [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — DATASET OVERVIEW  (dynamic from MRIDataset / CSV)
+# SECTION 4 — DATASET OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 st.markdown('<div class="section-label">Dataset Overview</div>', unsafe_allow_html=True)
-
-pills_html = " ".join([
-    f'<span style="padding:4px 11px;border-radius:6px;font-size:11.5px;font-weight:500;'
-    f'background:#eff6ff;color:#1a56db;border:1px solid #dbeafe;font-family:monospace;">{s}</span>'
-    for s in ["T1w", "T2w", "STIR", "T1+Gd", "DWI", "ADC"]
-])
 
 st.markdown(f"""
 <div style="background:white;border-radius:12px;border:1px solid #e2e8f0;
@@ -837,14 +724,10 @@ st.markdown(f"""
     <span style="padding:2px 8px;border-radius:4px;background:#f1f5f9;
                  color:#64748b;font-size:11px;font-family:monospace;">GET /dataset-info · {data_source}</span>
   </div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:18px;">
     <div style="text-align:center;padding:14px 8px;background:#eff6ff;border-radius:8px;border:1px solid #dbeafe;">
       <div style="font-size:28px;font-weight:700;color:#1a56db;">{total_images}</div>
-      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">Total MRI Images</div>
-    </div>
-    <div style="text-align:center;padding:14px 8px;background:#e0f2fe;border-radius:8px;border:1px solid #bae6fd;">
-      <div style="font-size:28px;font-weight:700;color:#0891b2;">{total_images:,}</div>
-      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">MRI Sequences</div>
+      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">Total Patients</div>
     </div>
     <div style="text-align:center;padding:14px 8px;background:#ede9fe;border-radius:8px;border:1px solid #ddd6fe;">
       <div style="font-size:28px;font-weight:700;color:#7c3aed;">{total_classes}</div>
@@ -867,13 +750,10 @@ for cls, cnt, color in zip(class_names, class_counts, class_colors):
     </div>""", unsafe_allow_html=True)
 
 st.markdown(f"""
-  <div style="margin-top:14px;">
-    <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;">Available MRI Sequences</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px;">{pills_html}</div>
-    <div style="font-size:11px;color:#94a3b8;margin-top:10px;">
-      Split: 70% train · 15% val · 15% test &nbsp;·&nbsp; Few-shot: 5-way 5-shot
-      &nbsp;·&nbsp; Source: <code>{data_source}</code>
-    </div>
+  <div style="font-size:11px;color:#94a3b8;margin-top:14px;">
+    Few-shot: {config.N_WAY}-way {config.K_SHOT}-shot ({config.Q_QUERY} query)
+    &nbsp;·&nbsp; Episodes per epoch: {config.EPISODES_PER_EPOCH}
+    &nbsp;·&nbsp; Source: <code>study_list.csv</code>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -910,16 +790,18 @@ with st.expander("📖 Architecture Notes"):
 | Component | Detail |
 |---|---|
 | **Backbone** | Vision Transformer (ViT) — patch-based self-attention |
-| **Input** | 224 × 224, single-channel (grayscale MRI) |
+| **Input** | {config.IMAGE_SIZE} × {config.IMAGE_SIZE}, single-channel (grayscale MRI) |
 | **Patches** | 16 × 16 → 196 tokens + 1 CLS token |
-| **Embed dim** | 512 |
+| **Embed dim** | {config.EMBED_DIM} |
 | **Depth** | 12 transformer layers, 8 heads |
-| **Few-shot head** | Siamese projection: 512 → 256 → 128 |
+| **Few-shot head** | Siamese projection: {config.EMBED_DIM} → {config.EMBED_DIM//2} → 128 |
 | **Similarity** | Cosine distance (support vs query embedding) |
-| **Protocol** | 5-way 5-shot episodic training |
+| **Protocol** | {config.N_WAY}-way {config.K_SHOT}-shot episodic training |
 | **Loss** | Prototypical + contrastive |
+| **Learning Rate** | {config.LR} |
+| **Max Epochs** | {config.EPOCHS} |
 
-Data source: **`{data_source}`** · Architecture source: **`{'models.siamese' if arch_is_real else 'placeholder'}`**
+Data source: **`{data_source}`** · Architecture source: **`{'models.siamese' if arch_is_real else 'placeholder'}`** · Config source: **`config.py`**
 """)
 
 

@@ -23,12 +23,13 @@ import io
 # ══════════════════════════════════════════════════════════════════════════════
 # PATHS  (relative to sts/ui/ where you run `streamlit run app.py`)
 # ══════════════════════════════════════════════════════════════════════════════
-DATASET_PATH  = "../data/index.csv"
-EVAL_SCRIPT   = "../eval/evaluate.py"   # subprocess target
+DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "study_list.csv")
+_UI_DIR     = os.path.dirname(os.path.abspath(__file__))   # sts/ui/
+_REPO_ROOT  = os.path.abspath(os.path.join(_UI_DIR, "..")) # sts/
+EVAL_SCRIPT = os.path.join(_REPO_ROOT, "eval", "evaluate.py")
 
 CLASS_COLORS  = ["#1a56db", "#0891b2", "#7c3aed", "#059669", "#d97706",
                  "#e11d48", "#0d9488", "#b45309"]
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG LOADER — Imports from master branch config.py
@@ -49,7 +50,6 @@ def load_config():
             "EPISODES_PER_EPOCH": cfg.EPISODES_PER_EPOCH,
         }
     except ImportError:
-        # Fallback defaults from config.py
         return {
             "N_WAY": 3,
             "K_SHOT": 1,
@@ -68,41 +68,26 @@ CONFIG = load_config()
 # 1.  DYNAMIC EVALUATION METRICS  — runs eval/evaluate.py via subprocess
 # ══════════════════════════════════════════════════════════════════════════════
 def get_eval_metrics():
-    """
-    Runs `python ../eval/evaluate.py`, captures stdout, parses:
-      - accuracy  (float)
-      - confusion matrix  (np.ndarray)
-      - full stdout  (used as classification report display)
-      - per-class f1 scores  (dict  label -> f1)
-    Returns a dict; all values are None on failure.
-    """
     result = subprocess.run(
         [sys.executable, EVAL_SCRIPT],
         capture_output=True,
         text=True,
-        cwd=os.path.abspath("..")        # run from repo root so relative paths inside evaluate.py work
+        cwd=_REPO_ROOT
     )
     output  = result.stdout
     stderr  = result.stderr
     success = result.returncode == 0
 
-    # ── Accuracy ─────────────────────────────────────────────────────────────
-    # Matches:  Accuracy: 0.9423   |   accuracy: 94.23   |   Accuracy = 0.94
-    acc_match = re.search(
-        r'(?i)accuracy[\s:=]+([0-9]+\.?[0-9]*)', output
-    )
+    acc_match = re.search(r'(?i)accuracy[\s:=]+([0-9]+\.?[0-9]*)', output)
     accuracy = None
     if acc_match:
         raw = float(acc_match.group(1))
-        accuracy = raw / 100.0 if raw > 1.0 else raw   # handle 94.2 vs 0.942
+        accuracy = raw / 100.0 if raw > 1.0 else raw
 
-    # ── Confusion Matrix ──────────────────────────────────────────────────────
-    # Matches numpy-style:  [[47  2  0] [1 51  1] ...]
     cm = None
     cm_match = re.search(r'(\[\s*\[.*?\]\s*\])', output, re.S)
     if cm_match:
         try:
-            # Replace whitespace-only separators with commas for eval()
             cm_text = re.sub(r'\s+', ' ', cm_match.group(1).strip())
             cm_text = re.sub(r'(?<=\d)\s+(?=\d|-)', ', ', cm_text)
             cm_text = re.sub(r'\]\s+\[', '], [', cm_text)
@@ -110,14 +95,12 @@ def get_eval_metrics():
         except Exception:
             cm = None
 
-    # ── Per-class F1 from classification report ───────────────────────────────
-    # Parses lines like:   leiomyosarcoma       0.96  0.94  0.95      50
     per_class = {}
     for line in output.splitlines():
         parts = line.split()
         if len(parts) >= 5:
             try:
-                label = parts[0]
+                label       = parts[0]
                 precision_v = float(parts[1])
                 recall_v    = float(parts[2])
                 f1_v        = float(parts[3])
@@ -133,26 +116,20 @@ def get_eval_metrics():
                 continue
 
     return {
-        "accuracy":   accuracy,
-        "cm":         cm,
-        "report":     output,
-        "stderr":     stderr,
-        "per_class":  per_class,
-        "success":    success,
+        "accuracy":  accuracy,
+        "cm":        cm,
+        "report":    output,
+        "stderr":    stderr,
+        "per_class": per_class,
+        "success":   success,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2.  DATASET INFO  — from MRIDataset or CSV fallback
+# 2.  DATASET INFO  — from study_list.csv  (columns: Patient ID, Histological type)
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def load_dataset_info():
-    """
-    Load dataset info from MRIDataset class (from dataset/mri_dataset.py)
-    with CSV fallback if import fails.
-    
-    ✅ FIX: Now builds class_counts manually from dataset.get_label()
-    """
     # ── Real MRIDataset ───────────────────────────────────────────────────────
     try:
         from dataset.mri_dataset import MRIDataset
@@ -160,40 +137,35 @@ def load_dataset_info():
         total_images  = len(dataset)
         class_names   = list(dataset.classes)
         total_classes = len(class_names)
-        
-        # ✅ FIX: Build class_counts manually since MRIDataset doesn't have class_counts attr
-        class_counts = []
+        class_counts  = []
         for cls in class_names:
             try:
-                count = sum(1 for i in range(len(dataset)) 
-                           if dataset.get_label(i) == cls)
+                count = sum(1 for i in range(len(dataset)) if dataset.get_label(i) == cls)
                 class_counts.append(count)
             except:
-                count = total_images // total_classes
-                class_counts.append(count)
-        
+                class_counts.append(total_images // total_classes)
         return total_images, total_classes, class_names, class_counts, "MRIDataset"
-    except Exception as e:
+    except Exception:
         pass
 
-    # ── CSV fallback ──────────────────────────────────────────────────────────
+    # ── study_list.csv  ───────────────────────────────────────────────────────
     try:
-        df = pd.read_csv(DATASET_PATH)
-        # ✅ FIX: Use correct column name from data/index.csv
-        label_col = "histological_type"  # From master branch data/index.csv
+        df        = pd.read_csv(DATASET_PATH)
+        label_col = "Histological type"          # primary column name
         if label_col not in df.columns:
-            # Fallback to generic search
+            # case-insensitive fallback search
             label_col = next(
                 (c for c in df.columns
-                 if c.lower() in ("label", "class", "tumor_type", "category", "diagnosis", "histological_type")),
+                 if c.lower() in ("histological type", "histological_type",
+                                  "label", "class", "tumor_type", "category", "diagnosis")),
                 df.columns[-1]
             )
         total_images  = len(df)
-        class_names   = sorted(df[label_col].unique().tolist())
+        class_names   = sorted(df[label_col].dropna().unique().tolist())
         total_classes = len(class_names)
         class_counts  = [int((df[label_col] == c).sum()) for c in class_names]
-        return total_images, total_classes, class_names, class_counts, f"CSV ({label_col})"
-    except Exception as e:
+        return total_images, total_classes, class_names, class_counts, f"study_list.csv"
+    except Exception:
         pass
 
     # ── Demo fallback ─────────────────────────────────────────────────────────
@@ -206,39 +178,10 @@ def load_dataset_info():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3.  AVAILABLE MRI SEQUENCES  — from data/index.csv
-# ══════════════════════════════════════════════════════════════════════════════
-@st.cache_data
-def get_available_sequences():
-    """
-    ✅ FIX: Extract unique sequence types from data/index.csv instead of hardcoding
-    Parses sequence_type column from CSV
-    """
-    try:
-        df = pd.read_csv(DATASET_PATH)
-        if "sequence_type" in df.columns:
-            sequences = sorted(df["sequence_type"].dropna().unique().tolist())
-            # Filter out UNKNOWN or OTHER
-            sequences = [s for s in sequences if s.upper() not in ["UNKNOWN", "OTHER"]]
-            if sequences:
-                return sequences
-    except Exception:
-        pass
-    
-    # Fallback from master branch (preprocess/index.py shows these normalized types)
-    return ["T1", "T2", "STIR", "T1CE", "DWI", "ADC", "FLAIR", "PD"]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 4.  MODEL ARCHITECTURE  — from SiameseViT with real EMBED_DIM
+# 3.  MODEL ARCHITECTURE
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def load_model_architecture():
-    """
-    Load model from models/siamese.py or create descriptive fallback
-    
-    ✅ FIX: Use CONFIG["EMBED_DIM"] (256 from config.py) instead of hardcoded 512
-    """
     try:
         from models.siamese import SiameseViT
         model = SiameseViT(CONFIG["EMBED_DIM"])
@@ -246,7 +189,6 @@ def load_model_architecture():
     except Exception:
         pass
 
-    # ✅ FIX: Use CONFIG["EMBED_DIM"] in fallback
     embed_dim = CONFIG["EMBED_DIM"]
     fallback = f"""SiameseViT(
   embed_dim = {embed_dim}
@@ -272,40 +214,29 @@ def load_model_architecture():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5.  TRAINING LOSS  — from config.EPOCHS or training_log.txt
+# 4.  TRAINING LOSS
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def load_training_loss():
-    """
-    ✅ FIX: Try real training_log.txt first, then fall back to config.EPOCHS
-    Parses lines like: "Epoch 1/10 | Loss: 1.43"
-    """
-    log_path = os.path.abspath("../training_log.txt")
+    log_path = os.path.join(_REPO_ROOT, "training_log.txt")
     if os.path.exists(log_path):
         train_losses, epochs_list = [], []
         try:
             with open(log_path) as f:
                 for line in f:
-                    # Match: "Epoch 1/10 | Loss: 1.43" or "Epoch 1/10 | Loss: 0.43"
-                    match = re.search(
-                        r'Epoch\s+(\d+)/\d+\s*\|\s*Loss:\s*([0-9.]+)',
-                        line
-                    )
+                    match = re.search(r'Epoch\s+(\d+)/\d+\s*\|\s*Loss:\s*([0-9.]+)', line)
                     if match:
                         epochs_list.append(int(match.group(1)))
                         train_losses.append(float(match.group(2)))
-            
             if epochs_list and train_losses:
                 return np.array(epochs_list), np.array(train_losses), None, "training_log.txt"
         except Exception:
             pass
 
-    # ✅ FIX: Generate realistic curves based on CONFIG["EPOCHS"] from config.py
     max_epochs = CONFIG["EPOCHS"]
     ep = np.arange(1, max_epochs + 1)
-    # Realistic exponential decay with noise
     tl = np.exp(-2.0 * ep / max_epochs) + 0.05 + np.random.RandomState(42).randn(max_epochs) * 0.02
-    tl = np.maximum(tl, 0.01)  # Ensure positive
+    tl = np.maximum(tl, 0.01)
     return ep, tl, None, f"config.EPOCHS (max {max_epochs})"
 
 
@@ -326,9 +257,10 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-#MainMenu{visibility:hidden;} footer{visibility:hidden;} .stDeployButton{display:none;}
+#MainMenu{visibility:hidden;}
+footer{visibility:hidden;}
+.stDeployButton{display:none;}
 .stApp { background: #f8fafc; }
-
 .header-bar {
     background: white; border-bottom: 1px solid #e2e8f0;
     padding: 14px 0 12px; margin: -1rem -1rem 0;
@@ -362,7 +294,6 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .meta-item-val { font-size:14px; font-weight:600; color:#0f172a; margin-top:3px; font-family:'DM Mono',monospace; }
 .info-step { background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; padding:11px 14px; margin-bottom:7px; font-size:13px; color:#0c4a6e; }
 .warning-box { margin-top:10px; padding:10px 12px; border-radius:8px; background:#fef3c7; border:1px solid #fde68a; font-size:11.5px; color:#92400e; }
-.eval-source { padding:2px 10px; border-radius:4px; font-size:11px; font-family:monospace; font-weight:500; }
 [data-testid="metric-container"] {
     background:white; border:1px solid #e2e8f0; border-radius:12px;
     padding:16px 20px; box-shadow:0 1px 3px rgba(0,0,0,0.06);
@@ -377,10 +308,10 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
     box-shadow:0 2px 8px rgba(26,86,219,0.3) !important;
 }
 .stButton > button:hover { box-shadow:0 4px 16px rgba(26,86,219,0.4) !important; }
-[data-testid="stFileUploader"] { border-radius:12px !important; background:#f8fafc !important; }
 .stSelectbox > div > div, .stTextInput > div > div > input {
     border-radius:8px !important; border-color:#e2e8f0 !important;
-    font-family:'DM Sans',sans-serif !important; background:#f8fafc !important;
+    font-family:'DM Sans',sans-serif !important; background:#ffffff !important;
+    color:#0f172a !important;
 }
 .stTextArea textarea { font-family:'DM Mono',monospace !important; font-size:12px !important; background:#0f172a !important; color:#e2e8f0 !important; }
 .footer { border-top:1px solid #e2e8f0; margin-top:40px; padding:16px 0; display:flex; justify-content:space-between; font-size:11.5px; color:#94a3b8; }
@@ -388,13 +319,12 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 """, unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════════════���══════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # LOAD STATIC DATA (cached)
 # ══════════════════════════════════════════════════════════════════════════════
 total_images, total_classes, class_names, class_counts, data_source = load_dataset_info()
 model_arch_str, arch_is_real, embed_dim = load_model_architecture()
 epochs, train_loss, val_loss, loss_source = load_training_loss()
-available_sequences = get_available_sequences()
 best_ep = int(np.argmin(train_loss)) + 1 if train_loss is not None else "—"
 
 # Extend color list to cover any number of classes
@@ -403,8 +333,8 @@ while len(CLASS_COLORS) < len(class_names):
 class_colors = CLASS_COLORS[:len(class_names)]
 
 # Session state
-if "eval_result"    not in st.session_state: st.session_state.eval_result    = None
-if "upload_result"  not in st.session_state: st.session_state.upload_result  = None
+if "eval_result"   not in st.session_state: st.session_state.eval_result   = None
+if "upload_result" not in st.session_state: st.session_state.upload_result = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -460,45 +390,66 @@ with col_upload:
       </div>
     </div>""", unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader(
-        "Drop MRI image here or click to browse",
-        type=["png", "jpg", "jpeg", "dcm"],
-        help="Accepted formats: PNG, JPG, DICOM"
+    folder_path = st.text_input(
+        "Paste local folder path containing MRI slices",
+        placeholder=r"e.g. C:\Users\user\sts\data\Soft-tissue-Sarcoma\STS_013\...\T2"
     )
-    if uploaded_file:
-        st.success(f"✓ **{uploaded_file.name}** · {uploaded_file.size / 1024:.1f} KB · Ready")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        patient_id = st.text_input("Patient ID", placeholder="e.g. PT-2024-001")
-    with c2:
-        # ✅ FIX: Use dynamic sequences from master branch instead of hardcoded list
-        mri_seq = st.selectbox("MRI Sequence",
-            [""] + available_sequences)
+    uploaded_files = []
+    uploaded_file  = None
+    valid_exts     = {".png", ".jpg", ".jpeg", ".dcm"}
+
+    if folder_path:
+        if os.path.isdir(folder_path):
+            folder_files = sorted([
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if os.path.splitext(f)[1].lower() in valid_exts
+            ])
+            if folder_files:
+                uploaded_files = folder_files
+                uploaded_file  = open(folder_files[0], "rb")
+                total_kb = sum(os.path.getsize(f) for f in folder_files) / 1024
+                st.success(f"✓ **{len(folder_files)} slices** found · {total_kb:.1f} KB total · Ready")
+            else:
+                st.warning("No image files (.png / .jpg / .dcm) found in that folder.")
+        else:
+            st.error("Folder not found — check the path and try again.")
+
+    # Auto-extract Patient ID from folder path (matches STS_XXX pattern)
+    patient_id = "—"
+    if folder_path:
+        match = re.search(r'(STS_\d+)', folder_path, re.IGNORECASE)
+        if match:
+            patient_id = match.group(1).upper()
 
     analyze_clicked = st.button("🔬  Analyze MRI Metadata", key="run_btn")
 
     if analyze_clicked:
         if uploaded_file is None:
-            st.warning("Please upload an MRI image first.")
+            st.warning("Please enter a folder path containing MRI slices first.")
         else:
             with st.spinner("Loading image and extracting metadata…"):
                 time.sleep(0.6)
             try:
+                uploaded_file.seek(0)
                 img = Image.open(uploaded_file)
                 w, h, mode = img.size[0], img.size[1], img.mode
-                channels = len(img.getbands())
+                channels   = len(img.getbands())
+                first_name = os.path.basename(uploaded_files[0])
             except Exception:
                 w, h, mode, channels = CONFIG["IMAGE_SIZE"], CONFIG["IMAGE_SIZE"], "L", 1
+                first_name = "unknown"
+
+            total_kb = sum(os.path.getsize(f) for f in uploaded_files) / 1024
 
             st.session_state.upload_result = {
-                "filename"  : uploaded_file.name,
-                "patient_id": patient_id or "PT-—",
-                "seq"       : mri_seq or "Not specified",
+                "filename"  : f"{len(uploaded_files)} slice(s) · first: {first_name}",
+                "patient_id": patient_id,
                 "width": w, "height": h,
                 "mode": mode, "channels": channels,
                 "timestamp" : datetime.now().strftime("%H:%M:%S"),
-                "file_size" : f"{uploaded_file.size / 1024:.1f} KB",
+                "file_size" : f"{total_kb:.1f} KB",
                 "image_obj" : uploaded_file,
             }
             st.rerun()
@@ -511,7 +462,7 @@ with col_result:
                     border-radius:12px;border:1px solid #e2e8f0;
                     box-shadow:0 1px 3px rgba(0,0,0,0.06);padding:40px;">
           <div style="font-size:48px;">🖼️</div>
-          <p style="font-size:13px;color:#94a3b8;">Upload an MRI image and click<br>
+          <p style="font-size:13px;color:#94a3b8;">Enter a folder path and click<br>
             <strong style="color:#64748b">Analyze MRI Metadata</strong></p>
         </div>""", unsafe_allow_html=True)
     else:
@@ -536,16 +487,16 @@ with col_result:
             <div class="meta-item-val">{r['patient_id']}</div>
           </div>
           <div class="meta-item">
-            <div class="meta-item-label">MRI Sequence</div>
-            <div class="meta-item-val">{r['seq']}</div>
-          </div>
-          <div class="meta-item">
             <div class="meta-item-label">File Size</div>
             <div class="meta-item-val">{r['file_size']}</div>
           </div>
           <div class="meta-item">
             <div class="meta-item-label">Loaded At</div>
             <div class="meta-item-val">{r['timestamp']}</div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-item-label">Slices</div>
+            <div class="meta-item-val">{r['filename'].split('·')[0].strip()}</div>
           </div>
         </div>
         <div class="warning-box">
@@ -560,7 +511,6 @@ st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 st.markdown('<div class="section-label">Model Evaluation — Live from eval/evaluate.py</div>',
             unsafe_allow_html=True)
 
-# ── Run evaluation button ─────────────────────────────────────────────────────
 eval_col, _ = st.columns([1, 3])
 with eval_col:
     run_eval = st.button("▶  Run Evaluation Script", key="eval_btn")
@@ -570,7 +520,6 @@ if run_eval:
         st.session_state.eval_result = get_eval_metrics()
     st.rerun()
 
-# ── Display results ───────────────────────────────────────────────────────────
 ev = st.session_state.eval_result
 
 if ev is None:
@@ -587,14 +536,11 @@ else:
     if not ev["success"]:
         st.error(f"**eval/evaluate.py exited with an error.**\n\n```\n{ev['stderr'][:600]}\n```")
 
-    # ── Top metrics row ───────────────────────────────────────────────────────
     accuracy  = ev["accuracy"]
     per_class = ev["per_class"]
 
-    # Derive precision / recall / f1 from per-class dict if available
     if per_class:
-        valid = [v for v in per_class.values()
-                 if isinstance(v, dict) and "f1" in v]
+        valid         = [v for v in per_class.values() if isinstance(v, dict) and "f1" in v]
         avg_precision = float(np.mean([v["precision"] for v in valid])) if valid else None
         avg_recall    = float(np.mean([v["recall"]    for v in valid])) if valid else None
         avg_f1        = float(np.mean([v["f1"]        for v in valid])) if valid else None
@@ -603,10 +549,7 @@ else:
 
     m1, m2, m3, m4 = st.columns(4, gap="medium")
     with m1:
-        if accuracy is not None:
-            st.metric("Model Accuracy",  f"{accuracy*100:.2f}%")
-        else:
-            st.metric("Model Accuracy",  "—")
+        st.metric("Model Accuracy",    f"{accuracy*100:.2f}%" if accuracy is not None else "—")
     with m2:
         st.metric("Precision (macro)", f"{avg_precision*100:.2f}%" if avg_precision else "—")
     with m3:
@@ -616,7 +559,6 @@ else:
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # ── Confusion Matrix + Classification Report ──────────────────────────────
     cm = ev["cm"]
     col_cm, col_report = st.columns([1, 1], gap="medium")
 
@@ -632,24 +574,15 @@ else:
         </div>""", unsafe_allow_html=True)
 
         if cm is not None:
-            n = cm.shape[0]
+            n           = cm.shape[0]
             tick_labels = class_names[:n] if len(class_names) >= n else [str(i) for i in range(n)]
-
             fig_cm, ax_cm = plt.subplots(figsize=(5.5, 4.2))
             fig_cm.patch.set_facecolor("white")
             ax_cm.set_facecolor("white")
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt="d",
-                cmap="Blues",
-                xticklabels=tick_labels,
-                yticklabels=tick_labels,
-                ax=ax_cm,
-                linewidths=0.5,
-                linecolor="#e2e8f0",
-                cbar_kws={"shrink": 0.8},
-            )
+            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                        xticklabels=tick_labels, yticklabels=tick_labels,
+                        ax=ax_cm, linewidths=0.5, linecolor="#e2e8f0",
+                        cbar_kws={"shrink": 0.8})
             ax_cm.set_xlabel("Predicted", fontsize=11, labelpad=8)
             ax_cm.set_ylabel("Actual",    fontsize=11, labelpad=8)
             ax_cm.tick_params(labelsize=10)
@@ -672,19 +605,13 @@ else:
         </div>""", unsafe_allow_html=True)
 
         report_text = ev["report"].strip() if ev["report"] else "(no output)"
-        st.text_area(
-            label="",
-            value=report_text,
-            height=320,
-            key="report_area",
-            label_visibility="collapsed",
-        )
+        st.text_area(label="", value=report_text, height=320,
+                     key="report_area", label_visibility="collapsed")
 
         if ev["stderr"].strip():
             with st.expander("⚠ stderr output"):
                 st.code(ev["stderr"], language="text")
 
-    # ── Per-class accuracy bar chart (from parsed F1 scores) ─────────────────
     if per_class:
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         st.markdown("""
@@ -711,18 +638,15 @@ else:
         ))
         fig_pc.update_layout(
             margin=dict(l=0, r=0, t=30, b=0), height=260,
-            yaxis=dict(
-                range=[max(0, min(pc_f1) - 5), 103],
-                title="F1 Score (%)", gridcolor="#f1f5f9",
-                ticksuffix="%", tickfont=dict(size=10),
-            ),
+            yaxis=dict(range=[max(0, min(pc_f1) - 5), 103],
+                       title="F1 Score (%)", gridcolor="#f1f5f9",
+                       ticksuffix="%", tickfont=dict(size=10)),
             xaxis=dict(showgrid=False, tickfont=dict(size=12)),
             paper_bgcolor="white", plot_bgcolor="white",
             font=dict(family="DM Sans"), showlegend=False,
         )
         st.plotly_chart(fig_pc, use_container_width=True, config={"displayModeBar": False})
 
-    # Timestamp of last eval run
     st.caption(f"Last evaluated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
@@ -771,12 +695,9 @@ st.plotly_chart(fig_loss, use_container_width=True, config={"displayModeBar": Fa
 
 tc1, tc2, tc3 = st.columns(3)
 for col, val, label, color in [
-    (tc1, f"{float(train_loss[-1]):.4f}",
-          "Final Train Loss",  "#1a56db"),
-    (tc2, f"{float(val_loss[-1]):.4f}" if val_loss is not None else "—",
-          "Final Val Loss",    "#f59e0b"),
-    (tc3, f"Ep. {best_ep}",
-          "Best Checkpoint",   "#059669"),
+    (tc1, f"{float(train_loss[-1]):.4f}", "Final Train Loss", "#1a56db"),
+    (tc2, f"{float(val_loss[-1]):.4f}" if val_loss is not None else "—", "Final Val Loss", "#f59e0b"),
+    (tc3, f"Ep. {best_ep}", "Best Checkpoint", "#059669"),
 ]:
     with col:
         st.markdown(f"""
@@ -788,17 +709,10 @@ for col, val, label, color in [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — DATASET OVERVIEW  (dynamic from MRIDataset / CSV)
+# SECTION 4 — DATASET OVERVIEW  (from study_list.csv)
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 st.markdown('<div class="section-label">Dataset Overview</div>', unsafe_allow_html=True)
-
-# ✅ FIX: Build pills HTML dynamically from available_sequences
-pills_html = " ".join([
-    f'<span style="padding:4px 11px;border-radius:6px;font-size:11.5px;font-weight:500;'
-    f'background:#eff6ff;color:#1a56db;border:1px solid #dbeafe;font-family:monospace;">{s}</span>'
-    for s in available_sequences[:8]  # Limit to 8 sequences for display
-])
 
 st.markdown(f"""
 <div style="background:white;border-radius:12px;border:1px solid #e2e8f0;
@@ -810,14 +724,10 @@ st.markdown(f"""
     <span style="padding:2px 8px;border-radius:4px;background:#f1f5f9;
                  color:#64748b;font-size:11px;font-family:monospace;">GET /dataset-info · {data_source}</span>
   </div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:18px;">
     <div style="text-align:center;padding:14px 8px;background:#eff6ff;border-radius:8px;border:1px solid #dbeafe;">
       <div style="font-size:28px;font-weight:700;color:#1a56db;">{total_images}</div>
-      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">Total MRI Images</div>
-    </div>
-    <div style="text-align:center;padding:14px 8px;background:#e0f2fe;border-radius:8px;border:1px solid #bae6fd;">
-      <div style="font-size:28px;font-weight:700;color:#0891b2;">{len(available_sequences)}</div>
-      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">MRI Sequences</div>
+      <div style="font-size:11px;color:#334155;margin-top:3px;font-weight:500;">Total Patients</div>
     </div>
     <div style="text-align:center;padding:14px 8px;background:#ede9fe;border-radius:8px;border:1px solid #ddd6fe;">
       <div style="font-size:28px;font-weight:700;color:#7c3aed;">{total_classes}</div>
@@ -839,15 +749,11 @@ for cls, cnt, color in zip(class_names, class_counts, class_colors):
       <span style="font-size:11.5px;color:#64748b;font-family:monospace;width:36px;text-align:right;">{cnt}</span>
     </div>""", unsafe_allow_html=True)
 
-# ✅ FIX: Use CONFIG parameters for few-shot info instead of hardcoded "5-way 5-shot"
 st.markdown(f"""
-  <div style="margin-top:14px;">
-    <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;">Available MRI Sequences</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px;">{pills_html}</div>
-    <div style="font-size:11px;color:#94a3b8;margin-top:10px;">
-      Few-shot: {CONFIG["N_WAY"]}-way {CONFIG["K_SHOT"]}-shot ({CONFIG["Q_QUERY"]} query) &nbsp;·&nbsp; Episodes per epoch: {CONFIG["EPISODES_PER_EPOCH"]}
-      &nbsp;·&nbsp; Source: <code>{data_source}</code>
-    </div>
+  <div style="font-size:11px;color:#94a3b8;margin-top:14px;">
+    Few-shot: {CONFIG["N_WAY"]}-way {CONFIG["K_SHOT"]}-shot ({CONFIG["Q_QUERY"]} query)
+    &nbsp;·&nbsp; Episodes per epoch: {CONFIG["EPISODES_PER_EPOCH"]}
+    &nbsp;·&nbsp; Source: <code>study_list.csv</code>
   </div>
 </div>""", unsafe_allow_html=True)
 
