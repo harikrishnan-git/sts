@@ -25,6 +25,7 @@ import pydicom
 import torch.nn.functional as F
 from models.ViTContainer import ViTContainer
 import config
+import math
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -47,29 +48,37 @@ def load_model():
     return model
 
 
-@st.cache_resource
-def load_support():
-
-    data = torch.load(SUPPORT_EMB_PATH)
-
-    embeddings = data["embeddings"]
-    labels = data["labels"]
-
-    support_embeddings = {}
-
-    for label in set(labels):
-
-        idx = [i for i,l in enumerate(labels) if l == label]
-
-        proto = embeddings[idx].mean(0)
-
-        support_embeddings[label] = proto
-
-    return support_embeddings
-
+@st.cache_data
+def get_support_embeddings():
+    if os.path.exists(SUPPORT_EMB_PATH):
+        # Using a status container for a professional look
+        with st.status("Loading knowledge base...", expanded=False) as status:
+            st.write("Fetching saved embeddings from disk...")
+            data = torch.load(SUPPORT_EMB_PATH, map_location=DEVICE)
+            
+            # If data contains raw samples, calculate prototypes
+            if isinstance(data, dict) and "embeddings" in data:
+                embeddings = data["embeddings"]
+                labels = data["labels"]
+                support_embeddings = {}
+                for label in set(labels):
+                    idx = [i for i, l in enumerate(labels) if l == label]
+                    support_embeddings[label] = embeddings[idx].mean(0)
+                status.update(label="Knowledge Base Loaded!", state="complete")
+                return support_embeddings
+            
+            status.update(label="Knowledge Base Loaded!", state="complete")
+            return data
+    else:
+        with st.spinner("Building embeddings from dataset (First run)..."):
+            # df = load_dataset()
+            # support_embeddings = build_support_embeddings(df)
+            # torch.save(support_embeddings, EMBED_PATH)
+            st.success("Embeddings generated and cached!")
+            return support_embeddings
 
 model = load_model()
-support_embeddings = load_support()
+support_embeddings = get_support_embeddings()
 
 def preprocess_dicom(uploaded_file):
 
@@ -87,26 +96,80 @@ def preprocess_dicom(uploaded_file):
 
     return img.to(DEVICE)
 
-def predict(img_tensor):
+
+def process_mri_volume(uploaded_files, target_size=(224, 224)):
+    """
+    Takes a list of uploaded DICOM files, selects the middle slice, 
+    and prepares it for the ViT encoder.
+    """
+    # 1. Filter and sort files (Streamlit UploadedFile objects)
+    dicom_files = sorted(
+        [f for f in uploaded_files if f.name.lower().endswith(".dcm")],
+        key=lambda x: x.name
+    )
+
+    if not dicom_files:
+        return None
+
+    # 2. Identify the middle slice
+    middle_idx = len(dicom_files) // 2
+    target_file = dicom_files[middle_idx]
+
+    try:
+        # 3. Read DICOM from memory buffer
+        # Use io.BytesIO because pydicom needs a file-like object
+        dcm = pydicom.dcmread(io.BytesIO(target_file.getvalue()))
+        img = dcm.pixel_array.astype(np.float32)
+        
+        # 4. Intensity Normalization (Zero-mean, Unit-variance)
+        img = (img - img.mean()) / (img.std() + 1e-8)
+
+        # 5. Spatial Resizing for ViT input
+        img = cv2.resize(img, target_size)
+
+        # 6. Add Channel and Batch dimensions: (1, 1, 224, 224)
+        # Note: If your ViT expects RGB (3 channels), use cv2.merge([img, img, img])
+        img_tensor = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).float()
+
+        return img_tensor.to(DEVICE), target_file.name
+
+    except Exception as e:
+        print(f"Error processing DICOM: {e}")
+        return None, None
+
+def predict(img_tensor, support_embeddings):
+    """
+    Takes the processed tensor from the middle slice and 
+    finds the closest prototype using Squared Euclidean Distance.
+    """
+    img_tensor = img_tensor.to(DEVICE)
 
     with torch.no_grad():
-
+        # Feature extraction (Output shape: [1, D])
         query_emb = model.encode(img_tensor)
 
     best_class = None
-    best_score = -float("inf")
+    # Initialize with infinity because we want the MINIMUM distance
+    best_dist = float("inf")
 
-    for label, emb in support_embeddings.items():
+    # 1. Find the closest prototype (Smallest Euclidean Distance)
+    for label, proto_emb in support_embeddings.items():
+        proto_emb = proto_emb.to(DEVICE)
+        
+        # d = ||query - prototype||^2
+        dist = torch.pow(query_emb - proto_emb, 2).sum().item()
 
-        emb = emb.to(DEVICE)
-
-        score = F.cosine_similarity(query_emb, emb.unsqueeze(0)).item()
-
-        if score > best_score:
-            best_score = score
+        if dist < best_dist:
+            best_dist = dist
             best_class = label
 
-    return best_class, best_score
+    # 2. Direct Conversion: Distance -> Confidence
+    # Alpha (a) controls how strictly the score drops. 
+    # Use 1.0 for standard, or 0.1 if your distances are very large.
+    alpha = 1.0 
+    confidence = math.exp(-alpha * best_dist) 
+
+    return best_class, confidence
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PATHS  (relative to sts/ui/ where you run `streamlit run app.py`)
@@ -461,69 +524,55 @@ with col_upload:
       </div>
     </div>""", unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader(
-        "Drop MRI image here or click to browse",
-        type=["png", "jpg", "jpeg", "dcm"],
-        help="Accepted formats: PNG, JPG, DICOM"
+    # 1. Enable multiple files
+    uploaded_files = st.file_uploader(
+        "Upload MRI DICOM Slices", 
+        type=["dcm"], 
+        accept_multiple_files=True
     )
-    if uploaded_file:
-        st.success(f"✓ **{uploaded_file.name}** · {uploaded_file.size / 1024:.1f} KB · Ready")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        patient_id = st.text_input("Patient ID", placeholder="e.g. PT-2024-001")
-    with c2:
-        mri_seq = st.selectbox("MRI Sequence",
-            ["", "T1-weighted", "T2-weighted", "STIR", "T1 post-contrast", "DWI"])
+    if uploaded_files:
+        st.success(f"✓ **{len(uploaded_files)} files uploaded** · Volume ready for processing")
 
-    analyze_clicked = st.button("🔬  Analyze MRI Metadata", key="run_btn")
+    # c1, c2 = st.columns(2)
+    # with c1:
+    #     patient_id = st.text_input("Patient ID", placeholder="e.g. PT-2024-001")
+    # with c2:
+    #     mri_seq = st.selectbox("MRI Sequence",
+    #         ["", "T1-weighted", "T2-weighted", "STIR", "T1 post-contrast", "DWI"])
+
+    analyze_clicked = st.button("🔬  Analyze MRI Volume", key="run_btn")
 
     if analyze_clicked:
-        if uploaded_file is None:
-            st.warning("Please upload an MRI image first.")
+        if not uploaded_files:
+            st.warning("Please upload MRI images first.")
         else:
-            with st.spinner("Loading image and extracting metadata…"):
-                time.sleep(0.6)
-            # --------------------------
-            # Run model prediction
-            # --------------------------
+            with st.spinner(f"Analyzing {len(uploaded_files)} slices..."):
+                # --- Use your existing function ---
+                img_tensor, slice_name = process_mri_volume(uploaded_files)
+                
+                if img_tensor is not None:
+                    try:
+                        # Run model prediction
+                        pred, score = predict(img_tensor, support_embeddings)
 
-            try:
-                ds = pydicom.dcmread(uploaded_file)
-
-                pixel_array = ds.pixel_array
-
-                # normalize for display
-                pixel_array = (pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min())
-                pixel_array = (pixel_array * 255).astype(np.uint8)
-
-                img = Image.fromarray(pixel_array)
-
-                w, h = img.size
-                mode = img.mode
-                channels = 1 if len(img.getbands()) == 1 else len(img.getbands())
-
-                img_tensor = preprocess_dicom(img)
-
-            except Exception as e:
-                st.error(f"Inference failed: {e}")
-                w, h, mode, channels = 224, 224, "L", 1
-
-            pred, score = predict(img_tensor)
-            st.session_state.upload_result = {
-                "filename"  : uploaded_file.name,
-                "patient_id": patient_id or "PT-—",
-                "seq"       : mri_seq or "Not specified",
-                "width": w, "height": h,
-                "mode": mode, "channels": channels,
-                "timestamp" : datetime.now().strftime("%H:%M:%S"),
-                "file_size" : f"{uploaded_file.size / 1024:.1f} KB",
-                "image_obj" : uploaded_file,
-                "prediction": pred,
-                "confidence": score
-            }
-            st.rerun()
-
+                        # 2. Store specific result metadata for the session state
+                        st.session_state.upload_result = {
+                            "filename"  : f"Volume: {len(uploaded_files)} slices",
+                            "mid_slice" : slice_name,
+                            "patient_id": patient_id or "PT-—",
+                            "seq"       : mri_seq or "Not specified",
+                            "width": 224, "height": 224, # Per your target_size
+                            "timestamp" : datetime.now().strftime("%H:%M:%S"),
+                            "prediction": pred,
+                            "confidence": score
+                        }
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Inference failed: {e}")
+                else:
+                    st.error("Failed to extract valid DICOM data from the uploaded volume.")
+                    
 with col_result:
     if st.session_state.upload_result is None:
         st.markdown("""
@@ -546,7 +595,6 @@ with col_result:
         st.markdown(f"""
         <div class="info-step">✅ <strong>Image loaded</strong> — {r['filename']}</div>
         <div class="info-step">📐 <strong>Resolution:</strong> {r['width']} × {r['height']} px
-          &nbsp;·&nbsp; Mode: {r['mode']} &nbsp;·&nbsp; Channels: {r['channels']}</div>
         <div class="info-step">⚙️ <strong>Normalised slice extracted</strong>
           — resized to 224 × 224, intensity [0, 1]</div>
         <div class="info-step">🚀 <strong>Ready for model evaluation</strong>
@@ -561,10 +609,6 @@ with col_result:
             <div class="meta-item-val">{r['seq']}</div>
           </div>
           <div class="meta-item">
-            <div class="meta-item-label">File Size</div>
-            <div class="meta-item-val">{r['file_size']}</div>
-          </div>
-          <div class="meta-item">
             <div class="meta-item-label">Loaded At</div>
             <div class="meta-item-val">{r['timestamp']}</div>
           </div>
@@ -574,9 +618,10 @@ with col_result:
             </div>
 
             <div class="meta-item">
-            <div class="meta-item-label">Confidence</div>
+            <div class="meta-item-label">Confidence Score</div>
             <div class="meta-item-val">
-                {f"{r.get('confidence',0)*100:.2f}%" if r.get('confidence') else "—"}
+                {f"{r.get('confidence', 0)*100:.2f}%" if r.get('confidence') else "—"}
+            </div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -905,6 +950,43 @@ st.markdown(f"""
 
 st.code(model_arch_str, language="text")
 
+st.markdown("""
+<style>
+    /* Main container for the architecture notes */
+    .info-step {
+        background-color: #f0f2f6; /* Light grey background */
+        color: #31333F;           /* Dark slate text */
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 5px;
+        border-left: 5px solid #ff4b4b; /* Red accent line */
+    }
+
+    /* Table styling inside the expander */
+    .stExpander table {
+        background-color: #ffffff;
+        color: #31333F;
+    }
+
+    /* Metadata grid styling */
+    .meta-grid {
+        background-color: #f9f9f9;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+    }
+
+    .meta-item-label {
+        color: #555 !important; /* Force darker grey for labels */
+        font-weight: bold;
+    }
+
+    .meta-item-val {
+        color: #000 !important; /* Force black for values */
+    }
+</style>
+""", unsafe_allow_html=True)
+
 with st.expander("📖 Architecture Notes"):
     st.markdown(f"""
 | Component | Detail |
@@ -915,9 +997,9 @@ with st.expander("📖 Architecture Notes"):
 | **Embed dim** | 512 |
 | **Depth** | 12 transformer layers, 8 heads |
 | **Few-shot head** | Siamese projection: 512 → 256 → 128 |
-| **Similarity** | Cosine distance (support vs query embedding) |
-| **Protocol** | 5-way 5-shot episodic training |
-| **Loss** | Prototypical + contrastive |
+| **Similarity** | Euclidean distance (support vs query embedding) |
+| **Protocol** | 3-way 3-shot episodic training |
+| **Loss** | Prototypical |
 
 Data source: **`{data_source}`** · Architecture source: **`{'models.siamese' if arch_is_real else 'placeholder'}`**
 """)

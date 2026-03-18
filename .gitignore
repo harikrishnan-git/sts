@@ -7,3 +7,4 @@ weights
 .venv
 venv
 data/test-img/
+data/vit-train
